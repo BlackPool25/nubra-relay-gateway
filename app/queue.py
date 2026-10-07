@@ -1,57 +1,82 @@
 import time
 import asyncio
-from typing import Optional
+from typing import Optional, Dict
 import redis.asyncio as aioredis
 from app.config import settings
 
-class RateLimiterQueue:
-    """
-    Leaky / Token Bucket Governor to regulate outbound requests to Nubra UAT.
-    Guarantees aggregate throughput stays strictly under the configured threshold.
-    """
-    def __init__(self):
-        self.capacity = settings.MAX_UPSTREAM_RPS
-        self.rate = settings.MAX_UPSTREAM_RPS  # tokens per second
-        self.tokens = float(self.capacity)
+class LocalTokenBucket:
+    def __init__(self, capacity: float, rate_per_sec: float):
+        self.capacity = float(capacity)
+        self.rate = float(rate_per_sec)
+        self.tokens = float(capacity)
         self.last_update = time.monotonic()
         self._lock = asyncio.Lock()
-        self.redis: Optional[aioredis.Redis] = None
-
-    def set_redis(self, redis_client: Optional[aioredis.Redis]):
-        self.redis = redis_client
 
     async def acquire(self):
-        """
-        Blocks asynchronously until an execution token is available.
-        """
-        if self.redis:
-            try:
-                # Redis token bucket via atomic script
-                allowed = await self._acquire_redis()
-                if allowed:
-                    return
-            except Exception:
-                pass  # Fallback to in-memory
-
-        # In-Memory Token Bucket
         async with self._lock:
             while True:
                 now = time.monotonic()
                 elapsed = now - self.last_update
                 self.last_update = now
 
-                # Replenish tokens based on elapsed time
-                self.tokens = min(float(self.capacity), self.tokens + elapsed * self.rate)
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
 
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
                 else:
-                    # Calculate wait time needed for at least 1 token
                     wait_time = (1.0 - self.tokens) / self.rate
                     await asyncio.sleep(max(0.005, wait_time))
 
-    async def _acquire_redis(self) -> bool:
+
+class DualRateLimiter:
+    """
+    Two-Tier Leaky/Token Bucket Governor matching official Nubra limits:
+    1. Trading & General REST: Max 85 ops/sec (Nubra UAT ceiling: 100 ops/sec per IP)
+    2. Historical Data: Max 50 req/min (Nubra REST ceiling: 60 req/min per IP)
+    """
+    def __init__(self):
+        self.redis: Optional[aioredis.Redis] = None
+
+        # In-memory token buckets
+        self.general_bucket = LocalTokenBucket(
+            capacity=settings.MAX_UPSTREAM_RPS,
+            rate_per_sec=settings.MAX_UPSTREAM_RPS
+        )
+        self.historical_bucket = LocalTokenBucket(
+            capacity=settings.MAX_HISTORICAL_RPM,
+            rate_per_sec=settings.MAX_HISTORICAL_RPM / 60.0
+        )
+
+    def set_redis(self, redis_client: Optional[aioredis.Redis]):
+        self.redis = redis_client
+
+    async def acquire(self, category: str = "general"):
+        """
+        Acquires an execution slot based on endpoint category: 'general' or 'historical'.
+        """
+        if category == "historical":
+            capacity = settings.MAX_HISTORICAL_RPM
+            rate = settings.MAX_HISTORICAL_RPM / 60.0
+            bucket_key = "rate_limit:upstream:historical"
+            local_bucket = self.historical_bucket
+        else:
+            capacity = settings.MAX_UPSTREAM_RPS
+            rate = float(settings.MAX_UPSTREAM_RPS)
+            bucket_key = "rate_limit:upstream:general"
+            local_bucket = self.general_bucket
+
+        if self.redis:
+            try:
+                allowed = await self._acquire_redis(bucket_key, capacity, rate)
+                if allowed:
+                    return
+            except Exception:
+                pass  # Fall back to local bucket
+
+        await local_bucket.acquire()
+
+    async def _acquire_redis(self, key: str, capacity: float, rate: float) -> bool:
         lua_script = """
         local key = KEYS[1]
         local capacity = tonumber(ARGV[1])
@@ -74,19 +99,22 @@ class RateLimiterQueue:
         if tokens >= 1.0 then
             tokens = tokens - 1.0
             redis.call('HMSET', key, 'tokens', tokens, 'last', last)
-            redis.call('EXPIRE', key, 60)
+            redis.call('EXPIRE', key, 120)
             return 1
         else
             redis.call('HMSET', key, 'tokens', tokens, 'last', last)
-            redis.call('EXPIRE', key, 60)
+            redis.call('EXPIRE', key, 120)
             return 0
         end
         """
         now_ms = int(time.time() * 1000)
-        res = await self.redis.eval(lua_script, 1, "rate_limit:upstream", self.capacity, self.rate, now_ms)
+        res = await self.redis.eval(lua_script, 1, key, capacity, rate, now_ms)
         if res == 1:
             return True
-        await asyncio.sleep(1.0 / self.rate)
+
+        # Sleep small interval if throttled
+        wait_interval = max(0.01, 1.0 / rate if rate > 0 else 0.1)
+        await asyncio.sleep(min(1.0, wait_interval))
         return True
 
-rate_limiter = RateLimiterQueue()
+rate_limiter = DualRateLimiter()

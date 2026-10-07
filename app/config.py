@@ -14,9 +14,10 @@ class Settings(BaseSettings):
     ALLOWED_STUDENT_TOKENS: str = "STU_TOKEN_ALPHA,STU_TOKEN_BRAVO,STU_TOKEN_CHARLIE,STU_DEMO"
     STUDENT_TOKEN_PREFIX: str = "STU_"
 
-    # Cache & Rate Limiting
+    # Cache & Rate Limiting (Aligned with official Nubra UAT limits: 100 ops/sec Trading, 60 req/min Historical)
     REDIS_URL: str = "redis://redis:6379/0"
-    MAX_UPSTREAM_RPS: int = 75
+    MAX_UPSTREAM_RPS: int = 85            # Ceiling is 100 ops/sec for UAT Trading & Orders
+    MAX_HISTORICAL_RPM: int = 50          # Ceiling is 60 req/min for Historical Data REST API
     ENABLE_CACHE: bool = True
 
     # Cache TTLs in seconds

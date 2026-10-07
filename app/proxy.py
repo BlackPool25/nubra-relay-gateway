@@ -50,9 +50,12 @@ async def relay_request(request: Request, path: str) -> Response:
             )
 
     # 4. Define Fetch Function for Upstream Call
+    clean_path = path.lower()
+    category = "historical" if "historical" in clean_path else "general"
+
     async def fetch_upstream():
-        # Enforce rate limiter queue
-        await rate_limiter.acquire()
+        # Enforce rate limiter queue matching Nubra limits
+        await rate_limiter.acquire(category=category)
 
         # Build upstream URL
         upstream_url = f"{settings.NUBRA_UAT_BASE.rstrip('/')}/{path.lstrip('/')}"
@@ -123,7 +126,7 @@ async def relay_request(request: Request, path: str) -> Response:
     # 7. Return verbatim response to student
     resp_headers = {
         k: v for k, v in headers.items()
-        if k.lower() in ("content-type", "content-encoding", "x-request-id")
+        if k.lower() in ("content-type", "content-encoding", "x-request-id", "retry-after")
     }
     resp_headers["X-Cache"] = "MISS" if is_safe_method else "BYPASS"
     resp_headers["X-Workshop-Student"] = student_id
