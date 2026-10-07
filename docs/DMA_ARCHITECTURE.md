@@ -313,12 +313,32 @@ When a participant executes an order placement (`POST /sentinel/orders/create`),
 
 ---
 
-## 7. Asynchronous Outbound Rate Governor
+## 7. Asynchronous Outbound Rate Governor (Nubra Matching Model)
 
-Upstream UAT limits are enforced via an asynchronous token-bucket queue:
-* **Nominal Outbound Target:** Maximum **75 requests/second** (Nubra UAT ceiling is 100 ops/sec, providing a 25% safety buffer).
-* **Redis Token Bucket:** Utilizes Redis `EVAL` with a Lua script for distributed token replenishment.
-* **In-Memory Fallback:** If Redis is disconnected, falls back seamlessly to `asyncio.Semaphore` and timestamp tracking.
+Upstream Nubra limits are enforced per IP address. The gateway models outbound egress through a **Two-Tier Dual-Bucket Rate Governor** matching Nubra's official rate limit tiers:
+
+### 7.1. Official Limit Specifications vs Gateway Enforcement
+
+| Endpoint Category | Official Nubra Ceiling | Gateway Regulated Target | Safety Buffer | Algorithmic Backing |
+| :--- | :--- | :--- | :--- | :--- |
+| **Trading & General APIs** | **100 ops/sec** per IP | **85 ops/sec** (`MAX_UPSTREAM_RPS`) | 15% Headroom | Token Bucket (`rate_limit:upstream:general`) |
+| **Historical Data (REST)** | **60 req/min** per IP | **50 req/min** (`MAX_HISTORICAL_RPM`) | 10 req/min Headroom | Leaky Bucket (`rate_limit:upstream:historical`) |
+| **Market Data WebSockets** | Tiered Weight System | N/A (REST Relay Layer) | N/A | N/A |
+
+### 7.2. Dual-Bucket Architecture & Route Classification
+Incoming requests are classified before reaching the egress queue:
+```
+Inbound Request ──► [Path Inspection] ──┬──► /historical-data/* ──► [Tier 2: 50 req/min Bucket] ──► Upstream Nubra
+                                         └──► All Other Routes  ──► [Tier 1: 85 ops/sec Bucket]  ──► Upstream Nubra
+```
+
+* **Tier 1 (Trading & Orders):** Governs `POST /sentinel/orders/*`, market depth, quotes, and instruments at a peak throughput of **85 ops/sec**, providing sub-millisecond execution while preventing 429 threshold breaches.
+* **Tier 2 (Historical Data):** Governs backtesting and historical candle queries at **50 req/min** (approx. 0.83 req/sec), insulating the host IP from Nubra's strict per-minute backtesting limit.
+
+### 7.3. Storage Engines & 429 Backoff Resilience
+* **Distributed Redis Token Bucket:** Utilizes Redis `EVAL` with atomic Lua scripts to maintain token count and replenish tokens smoothly across worker threads.
+* **Local In-Memory Fallback:** When Redis is offline, seamlessly engages `LocalTokenBucket` instances with micro-sleep intervals.
+* **Upstream 429 & Retry-After Propagation:** If an unexpected upstream 429 is encountered, the gateway parses the `Retry-After` header, temporarily halts bucket dispatch, and relays the header to client applications.
 
 ---
 
