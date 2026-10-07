@@ -1,0 +1,34 @@
+{
+  "students": [
+    {
+      "student_id": "stu_alpha",
+      "name": "Alpha Participant",
+      "token": "STU_TOKEN_ALPHA",
+      "status": "ACTIVE",
+      "metadata": {
+        "workstation": "WS-01",
+        "email": "alpha@workshop.local"
+      }
+    },
+    {
+      "student_id": "stu_bravo",
+      "name": "Bravo Participant",
+      "token": "STU_TOKEN_BRAVO",
+      "status": "ACTIVE",
+      "metadata": {
+        "workstation": "WS-02",
+        "email": "bravo@workshop.local"
+      }
+    },
+    {
+      "student_id": "stu_charlie",
+      "name": "Charlie Participant",
+      "token": "STU_TOKEN_CHARLIE",
+      "status": "ACTIVE",
+      "metadata": {
+        "workstation": "WS-03",
+        "email": "charlie@workshop.local"
+      }
+    }
+  ]
+}
