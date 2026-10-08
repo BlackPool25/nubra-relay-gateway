@@ -1,7 +1,7 @@
 import json
 import httpx
 from fastapi import Request, Response, HTTPException, status
-from app.config import settings
+from app.config import RELAYED_RESPONSE_HEADERS, settings
 from app.security import check_path_permission, authenticate_student
 from app.cache import cache_manager
 from app.queue import rate_limiter
@@ -263,9 +263,10 @@ async def relay_request(request: Request, path: str) -> Response:
             await cache_manager.invalidate_trade_state(ref_ids=ref_ids)
 
     # 7. Return verbatim response to student
+    # httpx decodes upstream bodies, so content-encoding must not be re-advertised.
     resp_headers = {
         k: v for k, v in headers.items()
-        if k.lower() in ("content-type", "content-encoding", "x-request-id", "retry-after")
+        if k.lower() in RELAYED_RESPONSE_HEADERS
     }
     resp_headers["X-Cache"] = "BYPASS" if (no_cache or not is_safe_method) else "MISS"
     resp_headers["X-Workshop-Student"] = student_id

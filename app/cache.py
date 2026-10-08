@@ -4,7 +4,7 @@ import hashlib
 import asyncio
 from typing import Optional, Tuple, Dict, Any, List
 import redis.asyncio as aioredis
-from app.config import settings
+from app.config import RELAYED_RESPONSE_HEADERS, settings
 
 class SingleFlightCoalescer:
     """
@@ -154,7 +154,7 @@ class CacheManager:
 
         safe_headers = {
             k: v for k, v in headers.items()
-            if k.lower() in ("content-type", "content-encoding", "x-request-id")
+            if k.lower() in RELAYED_RESPONSE_HEADERS
         }
 
         # 1. Store in Redis

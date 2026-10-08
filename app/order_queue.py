@@ -4,7 +4,7 @@ import base64
 import asyncio
 import time
 from typing import Optional, Tuple, Dict, Any, Callable
-from app.config import settings
+from app.config import RELAYED_RESPONSE_HEADERS, settings
 from app.queue import rate_limiter
 
 QUEUE_KEY = "nubra:queue:orders"
@@ -210,7 +210,7 @@ class RedisOrderQueue:
                     "content_b64": base64.b64encode(content).decode("ascii"),
                     "headers": {
                         k: v for k, v in headers.items()
-                        if k.lower() in ("content-type", "content-encoding", "x-request-id", "retry-after")
+                        if k.lower() in RELAYED_RESPONSE_HEADERS
                     }
                 })
 

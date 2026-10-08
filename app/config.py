@@ -2,6 +2,10 @@ import os
 from typing import List, Set
 from pydantic_settings import BaseSettings
 
+# Response headers safe to relay to students. content-encoding is excluded on
+# purpose: httpx decodes upstream bodies, so re-advertising gzip corrupts clients.
+RELAYED_RESPONSE_HEADERS = ("content-type", "x-request-id", "retry-after")
+
 class Settings(BaseSettings):
     # Upstream Nubra Configuration
     NUBRA_UAT_BASE: str = "https://uatapi.nubra.io"
