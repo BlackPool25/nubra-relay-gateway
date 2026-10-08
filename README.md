@@ -1,162 +1,214 @@
 # Nubra UAT Relay & Queue Gateway
 
-A transparent, zero-trust relay gateway designed for trading workshops, training bootcamps, and hackathons using the **Nubra Trading API (v3)** in its **UAT sandbox** (`https://uatapi.nubra.io`).
+A transparent relay gateway that lets a whole workshop share **one** authenticated
+Nubra Trading API (v3) UAT session — no per-student logins, no OTP round-trips,
+no knocked-off sessions.
+
+[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue)](./Dockerfile)
+[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688)](./app/main.py)
+[![Client adapter](https://img.shields.io/badge/PyPI-nubra__workshop-blue)](https://pypi.org/project/nubra-workshop/)
+[![SDK](https://img.shields.io/badge/SDK-nubra--sdk-blue)](https://pypi.org/project/nubra-sdk/)
+[![Docs](https://img.shields.io/badge/docs-Nubra%20API-lightgrey)](https://nubra.io/products/api/docs/)
+
+- **Students:** [`pip install nubra_workshop`](https://pypi.org/project/nubra-workshop/)
+  — see [Student guide](#-student-guide) below.
+- **Organizers:** `docker compose up -d` — see
+  [Organizer quickstart](#-organizer-quickstart).
+- **Deep dive:** [`docs/DMA_ARCHITECTURE.md`](./docs/DMA_ARCHITECTURE.md).
 
 ---
 
-## 🌟 Key Features
+## How it works
 
-* **Transparent Drop-in Compatibility:** Students keep 100% standard Nubra headers (`Authorization: Bearer <token>`, `x-device-id: <id>`) and standard request/response JSON schemas. They only change the `BASE_URL`.
-* **Zero Session Invalidation:** The gateway is the single authenticated client to Nubra UAT. Students never knock each other offline with HTTP 440 errors.
-* **Intelligent Query Caching & Request Coalescing:** Identical requests (quotes, instruments, order books) are served from cache with single-flight locks, preventing redundant upstream calls.
-* **Two-Tier Rate Governor (Nubra Matching):** Outbound requests are governed using dual token buckets matching Nubra's official per-IP limits:
-  * **Trading & Orders:** **85 ops/sec** (Nubra UAT ceiling: 100 ops/sec).
-  * **Historical Data (REST):** **50 req/min** (Nubra ceiling: 60 req/min).
-* **Event-Driven Write-Through Cache Invalidation:** Placing, modifying, or cancelling an order immediately purges cached order lists and symbol depth to guarantee zero stale reads.
-* **Default-Deny Security Guard:** Automatically blocks sensitive reporting endpoints (`/report/*`, `/userinfo`, `/profile`) and destructive bulk actions (`/trading/exit-all-positions`).
-* **Zero-Trust Expose Layer:** Containerized **Tailscale Funnel** exposes a public HTTPS endpoint to the open internet without router port forwarding or DNS setup.
-* **Configurable Student Verification Subsystem:** Toggled via `ENABLE_STUDENT_VERIFICATION=false` by default, with structured local registry support when enabled.
+Students point the official [`nubra-sdk`](https://pypi.org/project/nubra-sdk/)
+at the relay instead of Nubra. The relay swaps in the master UAT credentials
+upstream, caches repeated market data, governs outbound rate, and streams
+WebSockets through. Payloads and schemas stay 100% Nubra v3.
+
+```mermaid
+flowchart LR
+    subgraph Students["Student laptops"]
+        S1["Student A\nnubra-sdk"]
+        S2["Student B\nnubra-sdk"]
+        SN["Student N\nnubra-sdk"]
+    end
+    subgraph Edge["Zero-trust edge"]
+        F["Tailscale Funnel\npublic HTTPS"]
+    end
+    subgraph Host["Docker host"]
+        R["Relay (FastAPI)\nauth • cache • governor"]
+        RC["Redis\ncache + coalescing"]
+        RQ["Redis Queue\norder writes"]
+        WS["WS proxy\n1:1 upstream"]
+    end
+    UAT[("Nubra UAT\nuatapi.nubra.io")]
+    S1 & S2 & SN --> F --> R
+    R <--> RC
+    R --> RQ --> UAT
+    R <-.-> UAT
+    WS <-.-> UAT
+    R --- WS
+```
+
+A single REST request travels like this:
+
+```mermaid
+flowchart TB
+    A["Student request\nBearer STU_*"] --> B{"Blocked route?\n/report, /profile,\nexit-all, OTP flows"}
+    B -->|yes| F1["403 FORBIDDEN_ENDPOINT"]
+    B -->|no| C["Virtualized?\n/logout, /userinfo"]
+    C -->|yes| V["Local workshop response\n+ gateway WS URLs"]
+    C -->|no| D{"GET + cacheable?"}
+    D -->|hit| H["200 from cache\nX-Cache: HIT"]
+    D -->|miss / write| G["Rate governor\n85 ops/s • 50 hist/min"]
+    G --> Q{"Order write?"}
+    Q -->|yes| W["Redis queue\nsingle worker"]
+    Q -->|no| U["Upstream UAT\nmaster credentials"]
+    W --> U
+    U --> O{"Upstream OMS-disabled 403?"}
+    O -->|yes| M["403 OMS_DISABLED_UPSTREAM\n+ organizer guidance"]
+    O -->|no| R["Verbatim response\n+ trade-state invalidation"]
+```
+
+WebSocket connections are proxied 1:1 with token substitution:
+
+```mermaid
+flowchart LR
+    C["Student socket\nSTU_* token"] -->|connect| P["Relay WS proxy"]
+    P -->|dial with master token| N[("Nubra UAT WS")]
+    C <-->|batch_subscribe\ntoken swapped| P
+    P <--> N
+```
+
+> Scale note: load-tested to **600 concurrent sockets, zero failures**
+> (`scripts/ws_burst.py`). Nubra caps WebSocket usage by **per-session
+> subscription weight**, not connection count — and all students share one
+> session, so keep total subscribed streams reasonable. See
+> [subscription limits](https://nubra.io/products/api/docs/python-sdk-v3/realtime-data/subscription-limits.html).
 
 ---
 
-## 🚀 Quick Start for the Workshop Organizer
+## 📦 Student guide
 
-### Step 1: Run the Interactive PC Setup Wizard
+**1. Install**
 
-The interactive setup wizard verifies your Nubra UAT master credentials (via interactive OTP+MPIN terminal login or manual token entry), generates student access tokens, and creates a secure `.env` file:
+```bash
+pip install nubra-sdk nubra_workshop
+```
+
+Package links:
+[nubra_workshop on PyPI](https://pypi.org/project/nubra-workshop/) ·
+[nubra-sdk on PyPI](https://pypi.org/project/nubra-sdk/) ·
+[Nubra API docs](https://nubra.io/products/api/docs/)
+
+**2. Connect** — two lines at the top of every script (the `assert` proves you
+are on the gateway, not real UAT):
+
+```python
+import nubra_workshop
+nubra_workshop.apply_patch()
+assert nubra_workshop.is_active(), nubra_workshop.status()
+
+from nubra_python_sdk.start_sdk import InitNubraSdk, NubraEnv
+from nubra_python_sdk.refdata.instruments import InstrumentData
+from nubra_python_sdk.marketdata.market_data import MarketData
+from nubra_python_sdk.trading.trading_data import NubraTrader
+
+nubra = InitNubraSdk(NubraEnv.UAT)  # virtual session, no OTP/MPIN
+```
+
+No accounts, no phone numbers, no OTP. `nubra_workshop.status()` diagnoses
+routing at any time. Custom relay? `export NUBRA_GATEWAY_URL="https://..."`.
+
+**3. Five rules that bite everyone**
+
+| # | Rule |
+|---|------|
+| 1 | Orders go through `trader.create_order(...)` — there is **no** `place_order()` |
+| 2 | Prices are **integer paise** (`116770` = Rs 1167.70) |
+| 3 | Every order needs an integer `refId` from `InstrumentData.get_instrument_by_symbol(...)` (watch for `{"msg": ...}` not-found) |
+| 4 | `stratTags` takes **exactly one hyphenated tag**, e.g. `["team-alpha-leg1"]` |
+| 5 | Orderbook/greeks sockets need `str(ref_id)`, not symbols; `on_connect`/`on_close` receive one argument |
+
+**4. What works / what doesn't** (relay-account dependent, not code):
+
+| Works | Currently blocked upstream |
+|---|---|
+| Instruments (NSE/BSE/MCX masters) | `create_order` / modify / cancel |
+| Current price, quotes, historical candles | `get_margin` |
+| Option chain + Greeks, fundamentals | `funds` / `holdings` / `positions` |
+
+Blocked calls return a clear `OMS_DISABLED_UPSTREAM` error naming the cause.
+Trading code still runs as dry-runs showing exact payloads.
+
+---
+
+## 🛠️ Organizer quickstart
+
+**1. Credentials** — verify master UAT login and mint the `.env`:
 
 ```bash
 cd ~/projects/nubra-relay-gateway
 uv run scripts/setup_credentials.py
-# (or: python3 scripts/setup_credentials.py)
 ```
 
-### Step 2: Start the Containers with Tailscale Funnel
+**2. Launch** (all services restart automatically unless stopped):
 
-Start the isolated containers (Relay + Redis + Tailscale Funnel):
 ```bash
 docker compose up -d
 ```
-The containerized Tailscale service automatically:
-1. Connects to your tailnet using `TS_AUTHKEY`.
-2. Provisions a public Let's Encrypt certificate.
-3. Exposes the gateway publicly to the internet at `https://nubra-relay.<your-tailnet>.ts.net`.
 
-### Step 3: Retrieve the Public Gateway URL
+**3. Get the public URL** and hand it to students with the two-line header above:
 
-Run the URL detector script to verify the ingress status and extract the public HTTPS link for students:
 ```bash
 uv run scripts/get_gateway_url.py
-# (or: python3 scripts/get_gateway_url.py)
 ```
 
-### Step 4: Run Diagnostics
+**4. Verify** — diagnostics, relay test, socket burst:
 
-Verify the gateway is operational, caching correctly, and enforcing route security:
 ```bash
 python3 scripts/test_relay.py
+python3 scripts/ws_burst.py 120 15   # 120 parallel sockets, ~30s
 ```
 
 ---
 
-## 👨‍💻 Student Integration Guide
+## ⚙️ Configuration (`.env`)
 
-Provide students with your public gateway URL and their assigned token.
+| Variable | Default | Purpose |
+|---|---|---|
+| `NUBRA_UAT_BASE` | `https://uatapi.nubra.io` | Upstream sandbox (UAT-only; no prod path exists) |
+| `NUBRA_SESSION_TOKEN` / `NUBRA_DEVICE_ID` | *(required)* | Master UAT credentials |
+| `ENABLE_STUDENT_VERIFICATION` | `false` | Validate students against `students.json` when `true` |
+| `ALLOWED_STUDENT_TOKENS` | `STU_TOKEN_ALPHA,...` | Accepted tokens / prefix |
+| `MAX_UPSTREAM_RPS` | `85` | Trading/general governor (UAT ceiling: 100/s) |
+| `MAX_HISTORICAL_RPM` | `50` | Historical governor (ceiling: 60/min) |
+| `ENABLE_CACHE` | `true` | Redis/memory cache + single-flight coalescing |
+| `CACHE_TTL_INSTRUMENTS` / `_ORDERBOOK` / `_QUOTES` / `_HISTORICAL` | `3600` / `1.5` / `1.0` / `60.0` | Per-path TTL seconds |
+| `TS_AUTHKEY` | *(optional)* | Tailscale key for public Funnel ingress |
 
-### Python Example (`requests`)
-
-Students use the exact same Nubra V3 endpoints and schemas—they only replace the base URL:
-
-```python
-import requests
-
-# 1. Change only the Base URL
-BASE_URL = "https://nubra-relay.<your-tailnet>.ts.net"
-
-# 2. Use standard Nubra Bearer header with assigned student token
-headers = {
-    "Authorization": "Bearer STU_TOKEN_01_A8B2",
-    "x-device-id": "student-laptop-01",
-    "Content-Type": "application/json"
-}
-
-# Fetch Market Instruments (Served instantly from cache)
-instruments = requests.get(f"{BASE_URL}/instruments", headers=headers)
-print("Instruments:", instruments.json())
-
-# Fetch Market Depth
-orderbook = requests.get(f"{BASE_URL}/orderbooks/97713", headers=headers)
-print("Orderbook:", orderbook.json())
-
-# Place Order (Sentinel OMS V3 Schema — prices are integer paise)
-order_payload = {
-    "refId": 71878,
-    "qty": 1,
-    "side": "BUY",
-    "deliveryType": "IDAY",
-    "priceType": "LIMIT",
-    "validityType": "DAY",
-    "isMultiLeg": False,
-    "executionMode": "ENTRY",
-    "entryPrice": 100000,
-    "stratTags": ["workshop-trade-01"],  # exactly one hyphenated tag
-}
-
-order_resp = requests.post(f"{BASE_URL}/sentinel/orders/create", json=order_payload, headers=headers)
-print("Order Placement:", order_resp.json())
-```
-
-### Approach B: Using the Official `nubra-sdk` Python Package (`NubraTrader`)
-
-If the workshop assignment requires using Nubra's official Python SDK classes (`NubraTrader`), students can use [`scripts/student_sdk_helper.py`](file:///home/shreyas/projects/nubra-relay-gateway/scripts/student_sdk_helper.py) to initialize `NubraTrader` targeting the relay without needing an OTP or MPIN:
-
-```python
-from student_sdk_helper import get_nubra_trader
-
-RELAY_URL = "https://nubra-relay.<your-tailnet>.ts.net"
-STUDENT_TOKEN = "STU_TOKEN_01_A8B2"
-
-# Instantiates an authenticated NubraTrader instance directly
-trader = get_nubra_trader(RELAY_URL, STUDENT_TOKEN)
-
-# Place orders using official SDK methods (prices are integer paise):
-response = trader.create_order({
-    "refId": 71878,
-    "qty": 1,
-    "side": "BUY",
-    "deliveryType": "IDAY",
-    "priceType": "LIMIT",
-    "validityType": "DAY",
-    "isMultiLeg": False,
-    "executionMode": "ENTRY",
-    "entryPrice": 100000,
-    "stratTags": ["workshop-trade-01"],  # exactly one hyphenated tag
-})
-print("Order Response:", response)
-```
+Blocked by default (403 `FORBIDDEN_ENDPOINT`): `/report/*`, `/profile`,
+`/trading/exit-all-positions`, `/trading/orders/cancel-all`, OTP/TOTP/login
+endpoints. `/logout` and `/userinfo` are safely virtualized instead of forwarded.
 
 ---
 
-## ⚙️ Configuration Reference (`.env`)
+## 🧪 Testing
 
-| Variable | Default | Description |
-| :--- | :--- | :--- |
-| `NUBRA_UAT_BASE` | `https://uatapi.nubra.io` | Upstream Nubra UAT sandbox base URL |
-| `NUBRA_SESSION_TOKEN` | *(required)* | Master session token from your Nubra account |
-| `NUBRA_DEVICE_ID` | *(required)* | Master device ID tied to the session token |
-| `ENABLE_STUDENT_VERIFICATION` | `false` | When true, validates students against `students.json` |
-| `ALLOWED_STUDENT_TOKENS` | `STU_TOKEN_ALPHA,...` | Comma-separated list of allowed student tokens |
-| `MAX_UPSTREAM_RPS` | `85` | Max requests per second for Trading/Orders (Nubra UAT ceiling: 100 ops/sec) |
-| `MAX_HISTORICAL_RPM` | `50` | Max requests per minute for Historical Data (Nubra ceiling: 60 req/min) |
-| `ENABLE_CACHE` | `true` | Enables Redis/memory caching layer |
-| `CACHE_TTL_INSTRUMENTS` | `3600` | Instrument list cache TTL (1 hour) |
-| `CACHE_TTL_ORDERBOOK` | `1.5` | Orderbook / market depth cache TTL (seconds) |
-| `CACHE_TTL_QUOTES` | `1.0` | Quote / LTP cache TTL (seconds) |
-| `CACHE_TTL_HISTORICAL` | `60.0` | Historical candle data cache TTL (seconds) |
-| `TS_AUTHKEY` | *(optional)* | Tailscale Auth Key for public Funnel HTTPS ingress |
+```bash
+.venv/bin/python -m pytest tests/test_oms_disabled_mapping.py tests/test_relayed_headers.py -q
+```
+
+Unit tests run anywhere. The remaining suites in `tests/` are integration
+tests against a live local stack (`localhost:8000`).
 
 ---
 
-## 🛡️ Security Architecture
+## 🛡️ Security model
 
-* Detailed architectural specifications, data models, single-flight coalescing design, rate limit calculations, and request flow diagrams are documented in [`docs/DMA_ARCHITECTURE.md`](file:///home/shreyas/projects/nubra-relay-gateway/docs/DMA_ARCHITECTURE.md).
+Single shared master session upstream; students identified by Bearer token,
+never see master credentials. Sensitive reporting and destructive bulk routes
+are deny-listed. See [`docs/DMA_ARCHITECTURE.md`](./docs/DMA_ARCHITECTURE.md)
+for the full data-model and threat reference.
+
+Support: `support@nubra.io` (SDK/product) · GitHub Issues (relay).
