@@ -7,7 +7,7 @@ long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists
 
 setup(
     name="nubra_workshop",
-    version="1.0.0",
+    version="1.0.1",
     description="Drop-in workshop adapter for official Nubra Python SDK",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -19,7 +19,7 @@ setup(
     },
     include_package_data=True,
     install_requires=[
-        "nubra-sdk>=0.5.4",
+        "nubra-sdk>=0.5.4,<0.6",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

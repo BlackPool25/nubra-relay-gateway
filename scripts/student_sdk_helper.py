@@ -64,11 +64,16 @@ def get_nubra_trader(
     Example:
     >>> trader = get_nubra_trader("https://nubra-relay.<tailnet>.ts.net", "STU_TOKEN_01")
     >>> trader.create_order({
-    ...     "ref_id": 97713,
-    ...     "order_side": "ORDER_SIDE_BUY",
-    ...     "order_type": "ORDER_TYPE_LIMIT",
-    ...     "order_qty": 10,
-    ...     "order_price": 450.5
+    ...     "refId": 71878,
+    ...     "qty": 1,
+    ...     "side": "BUY",
+    ...     "deliveryType": "IDAY",
+    ...     "priceType": "LIMIT",
+    ...     "validityType": "DAY",
+    ...     "isMultiLeg": False,
+    ...     "executionMode": "ENTRY",
+    ...     "entryPrice": 100000,  # integer paise
+    ...     "stratTags": ["workshop-trade-01"],
     ... })
     """
     client = get_relay_client(relay_url, student_token, device_id)

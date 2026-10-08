@@ -67,6 +67,35 @@ def _extract_ref_ids(body: bytes) -> list:
     return seen
 
 
+def map_oms_disabled_response(status_code: int, content: bytes):
+    """Remap upstream 'OMS v2 is not enabled' 403s to a workshop-friendly error.
+
+    Returns (status_code, content) with an explanatory body when the upstream
+    rejected a trading/portfolio call for a non-OMS account, else None.
+    Status code is preserved so existing callers/tests are unaffected.
+    """
+    if status_code != 403 or not content:
+        return None
+    try:
+        text = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
+    except Exception:
+        return None
+    if "oms v2 is not enabled" not in text.lower():
+        return None
+    body = json.dumps({
+        "status": "error",
+        "error_code": "OMS_DISABLED_UPSTREAM",
+        "message": (
+            "Upstream Nubra rejected this trading/portfolio call: OMS is not "
+            "enabled for the relay account. Market data is unaffected. Ask the "
+            "workshop organizer to enable OMS on the master UAT account."
+        ),
+        "upstream_status": 403,
+        "upstream_body": text[:500],
+    })
+    return status_code, body.encode("utf-8")
+
+
 async def _dispatch_via_queue(request, path: str, student_id: str, query_params: dict, body: bytes):
     try:
         from app.order_queue import order_queue
@@ -213,6 +242,11 @@ async def relay_request(request: Request, path: str) -> Response:
         )
 
     status_code, content, headers = result
+
+    # Workshop-friendly mapping for upstream OMS-disabled rejections.
+    mapped = map_oms_disabled_response(status_code, content)
+    if mapped is not None:
+        status_code, content = mapped
 
     # 6. Post-Processing & Event-Driven Cache Invalidation
     if is_safe_method and cache_key and status_code == 200:

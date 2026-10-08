@@ -88,16 +88,18 @@ print("Instruments:", instruments.json())
 orderbook = requests.get(f"{BASE_URL}/orderbooks/97713", headers=headers)
 print("Orderbook:", orderbook.json())
 
-# Place Order (Sentinel OMS V3 Schema)
+# Place Order (Sentinel OMS V3 Schema — prices are integer paise)
 order_payload = {
-    "refId": 97713,
-    "transactionType": "TRANSACTION_TYPE_BUY",
-    "orderType": "ORDER_TYPE_LIMIT",
-    "deliveryType": "ORDER_DELIVERY_TYPE_IDAY",
-    "validityType": "ORDER_VALIDITY_TYPE_DAY",
-    "unitQty": 10,
-    "entryPrice": 450.50,
-    "intentOrderId": "trade_student_01"
+    "refId": 71878,
+    "qty": 1,
+    "side": "BUY",
+    "deliveryType": "IDAY",
+    "priceType": "LIMIT",
+    "validityType": "DAY",
+    "isMultiLeg": False,
+    "executionMode": "ENTRY",
+    "entryPrice": 100000,
+    "stratTags": ["workshop-trade-01"],  # exactly one hyphenated tag
 }
 
 order_resp = requests.post(f"{BASE_URL}/sentinel/orders/create", json=order_payload, headers=headers)
@@ -117,15 +119,18 @@ STUDENT_TOKEN = "STU_TOKEN_01_A8B2"
 # Instantiates an authenticated NubraTrader instance directly
 trader = get_nubra_trader(RELAY_URL, STUDENT_TOKEN)
 
-# Place orders using official SDK methods:
+# Place orders using official SDK methods (prices are integer paise):
 response = trader.create_order({
-    "ref_id": 97713,
-    "order_side": "ORDER_SIDE_BUY",
-    "order_type": "ORDER_TYPE_LIMIT",
-    "order_qty": 10,
-    "order_price": 450.5,
-    "order_delivery_type": "ORDER_DELIVERY_TYPE_IDAY",
-    "execution_type": "STRATEGY_TYPE_MARKET"
+    "refId": 71878,
+    "qty": 1,
+    "side": "BUY",
+    "deliveryType": "IDAY",
+    "priceType": "LIMIT",
+    "validityType": "DAY",
+    "isMultiLeg": False,
+    "executionMode": "ENTRY",
+    "entryPrice": 100000,
+    "stratTags": ["workshop-trade-01"],  # exactly one hyphenated tag
 })
 print("Order Response:", response)
 ```
