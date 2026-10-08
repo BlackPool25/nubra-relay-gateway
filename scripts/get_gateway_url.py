@@ -32,7 +32,17 @@ def get_tailscale_container_url():
     try:
         status_raw = subprocess.check_output(cmd_status, text=True)
         status_json = json.loads(status_raw)
-        
+
+        backend_state = status_json.get("BackendState", "")
+        if backend_state == "NeedsMachineAuth":
+            return None, (
+                "Device Approval Required: The container 'nubra-relay' joined your Tailnet, but your\n"
+                "    Tailscale account requires admin authorization before it can go online.\n"
+                "    👉 Approve it here: https://login.tailscale.com/admin/machines"
+            )
+        if backend_state == "NeedsLogin":
+            return None, "Tailscale requires authentication. Verify TS_AUTHKEY in .env."
+
         # Self node details
         self_node = status_json.get("Self", {})
         dns_name = self_node.get("DNSName", "").rstrip(".")
@@ -46,7 +56,8 @@ def get_tailscale_container_url():
             domain = None
 
         if domain:
-            return f"https://{domain}", None
+            url = f"https://{domain}"
+            return url, None
         else:
             return None, "Tailscale node active, but domain not yet assigned."
     except Exception as e:
