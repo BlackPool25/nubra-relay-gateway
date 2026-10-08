@@ -80,9 +80,20 @@ def check_path_permission(path: str):
 
 def authenticate_student(request: Request) -> str:
     """
-    Validates student credentials transparently.
+    Transparent student identification.
+    When ENABLE_STUDENT_VERIFICATION is False (default for workshop), requests
+    are processed without requiring student logins or tokens.
     """
     token = extract_client_token(request)
+    client_ip = request.client.host if request.client else "unknown"
+
+    if not settings.ENABLE_STUDENT_VERIFICATION:
+        # Open workshop access: no verification checks or tokens required
+        if token:
+            return token[:32]
+        return f"student-{client_ip}"
+
+    # Detailed verification against students.json only when explicitly enabled
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -104,4 +115,4 @@ def authenticate_student(request: Request) -> str:
             }
         )
 
-    return identifier or "student"
+    return identifier or f"student-{client_ip}"

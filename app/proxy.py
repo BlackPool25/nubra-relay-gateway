@@ -233,7 +233,7 @@ async def relay_request(request: Request, path: str) -> Response:
         k: v for k, v in headers.items()
         if k.lower() in ("content-type", "content-encoding", "x-request-id", "retry-after")
     }
-    resp_headers["X-Cache"] = "MISS" if is_safe_method else "BYPASS"
+    resp_headers["X-Cache"] = "BYPASS" if (no_cache or not is_safe_method) else "MISS"
     resp_headers["X-Workshop-Student"] = student_id
 
     return Response(

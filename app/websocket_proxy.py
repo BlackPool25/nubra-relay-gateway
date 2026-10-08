@@ -37,7 +37,7 @@ async def proxy_websocket(websocket: WebSocket, path: str):
         if auth_hdr and auth_hdr.startswith("Bearer "):
             token = auth_hdr[7:].strip()
 
-    # If verification is enabled, validate token
+    # 1b. Validate student token only if student verification is explicitly enabled
     if settings.ENABLE_STUDENT_VERIFICATION:
         if not token or not student_registry.verify_token(token)[0]:
             await websocket.close(code=4401, reason="Unauthorized student token")
@@ -47,7 +47,7 @@ async def proxy_websocket(websocket: WebSocket, path: str):
     await websocket.accept()
 
     # 3. Construct Upstream Nubra WebSocket URL
-    # Student ?token= is ignored; master session token is always used upstream.
+    # Master session token is always used upstream.
     clean_path = path.lstrip("/")
     upstream_ws_url = f"{settings.NUBRA_UAT_WS_BASE.rstrip('/')}/{clean_path}"
     # OMS sockets require ?token=<master_session> on connect.
@@ -77,27 +77,33 @@ async def proxy_websocket(websocket: WebSocket, path: str):
                     while True:
                         msg = await websocket.receive()
                         if "text" in msg and msg["text"]:
-                            text_data = msg["text"]
-                            # Market-data batch syntax: "batch_subscribe <token> ..."
-                            # OMS order/portfolio syntax: "subscribe <token> direct_intent ..."
-                            # Query-param syntax: "...?token=<student>" is also rewritten.
-                            if "batch_subscribe" in text_data or "batch_unsubscribe" in text_data:
-                                # Replace token after batch_subscribe / batch_unsubscribe
-                                text_data = re.sub(
-                                    r"(batch_(?:un)?subscribe\s+)(\S+)",
-                                    f"\\1{settings.NUBRA_SESSION_TOKEN}",
-                                    text_data,
-                                    count=1,
-                                )
-                            elif text_data.strip().startswith(("subscribe ", "unsubscribe ")):
-                                # OMS: "subscribe <token> direct_intent notification"
-                                #      "subscribe <token> direct_portfolio NOTIFICATION_..."
-                                text_data = re.sub(
-                                    r"^(subscribe|unsubscribe)\s+\S+",
-                                    f"\\1 {settings.NUBRA_SESSION_TOKEN}",
-                                    text_data.strip(),
-                                    count=1,
-                                )
+                            text_data = msg["text"].strip()
+                            parts = text_data.split(maxsplit=2)
+                            cmd = parts[0].lower() if parts else ""
+                            
+                            # Market-data batch syntax: batch_subscribe [token] <payload>
+                            if cmd in ("batch_subscribe", "batch_unsubscribe") and len(parts) >= 2:
+                                # Check if second word looks like a known action or token
+                                known_batch_keywords = ("orderbook_depth", "post_market", "option", "index_bucket", "socket_interval", "trade", "ohlcv")
+                                if parts[1] in known_batch_keywords or parts[1].startswith("{"):
+                                    # Student omitted token entirely: batch_subscribe <keyword> ...
+                                    text_data = f"{parts[0]} {settings.NUBRA_SESSION_TOKEN} " + " ".join(parts[1:])
+                                else:
+                                    # Student included a placeholder/student token: replace it
+                                    rest = parts[2] if len(parts) > 2 else ""
+                                    text_data = f"{parts[0]} {settings.NUBRA_SESSION_TOKEN} {rest}".strip()
+
+                            # OMS order/portfolio syntax: subscribe [token] <channel> <event>
+                            elif cmd in ("subscribe", "unsubscribe") and len(parts) >= 2:
+                                known_channels = ("direct_intent", "direct_portfolio")
+                                if parts[1] in known_channels:
+                                    # Student omitted token: subscribe direct_intent notification
+                                    text_data = f"{parts[0]} {settings.NUBRA_SESSION_TOKEN} " + " ".join(parts[1:])
+                                else:
+                                    # Student included dummy/student token: replace it
+                                    rest = parts[2] if len(parts) > 2 else ""
+                                    text_data = f"{parts[0]} {settings.NUBRA_SESSION_TOKEN} {rest}".strip()
+
                             await upstream_ws.send(text_data)
                         elif "bytes" in msg and msg["bytes"]:
                             await upstream_ws.send(msg["bytes"])
