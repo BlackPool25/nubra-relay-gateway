@@ -19,7 +19,7 @@ import os
 import sys
 
 # Default to the live Tailscale Funnel gateway or local relay
-DEFAULT_GATEWAY = "https://nubra-relay.tail2b15c4.ts.net"
+DEFAULT_GATEWAY = "https://nubra-relay-1.tail2b15c4.ts.net"
 GATEWAY_URL = os.getenv("NUBRA_GATEWAY_URL", DEFAULT_GATEWAY).rstrip("/")
 
 try:
