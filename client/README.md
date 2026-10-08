@@ -1,56 +1,55 @@
-# Nubra Workshop Relay Adapter (`nubra-workshop-relay`)
+# nubra_workshop
 
-Drop-in client adapter for participants of Nubra workshops.
+Drop-in workshop adapter for the official [Nubra Python SDK](https://pypi.org/project/nubra-sdk/).
 
-Allows participants to run **official Nubra Python SDK tutorial code** with **zero modifications**, without needing personal Nubra accounts, phone numbers, SMS OTPs, or MPIN prompts.
+This package allows workshop participants and students to run **unmodified, official Nubra Python SDK tutorials and examples** without needing individual account signups, phone numbers, SMS OTPs, or MPINs.
 
 ---
 
-## 🚀 How Students Use This (Zero Repo Cloning Required)
+## 🚀 Quick Start for Students
 
-Participants do **NOT** need to clone the repository or download zip files. They just run one pip command:
-
+### 1. Install
 ```bash
-pip install git+https://github.com/BlackPool25/nubra-relay-gateway.git#subdirectory=client
+pip install nubra_workshop
 ```
 
----
-
-## 📝 Code Usage
-
-### Option A: 1-Line Import at the top of their script (Recommended)
+### 2. Run Unmodified Nubra Code!
+Write native Nubra SDK code exactly as shown in official Nubra documentation:
 
 ```python
-import nubra_patch  # Automatically connects to the live workshop relay
-
-# Now write official Nubra SDK code exactly as taught:
 from nubra_python_sdk.start_sdk import InitNubraSdk, NubraEnv
 from nubra_python_sdk.refdata.instruments import InstrumentData
 from nubra_python_sdk.marketdata.market_data import MarketData
 
-# Initializes instantly without OTP or MPIN prompts!
+# Initializes via the workshop relay gateway automatically:
 nubra = InitNubraSdk(NubraEnv.UAT)
 
-# Resolve instruments
+# Fetch instruments:
 instruments = InstrumentData(nubra)
 inst = instruments.get_instrument_by_symbol("RELIANCE26OCT700CE", exchange="NSE")
-print("Instrument:", inst.stock_name, "RefID:", inst.ref_id)
+print("Found instrument:", inst.stock_name if inst else "None")
 
-# Fetch market data
+# Live market data:
 market = MarketData(nubra)
-quote = market.quote(ref_id=inst.ref_id, levels=5)
-print("LTP:", quote.orderBook.last_traded_price)
+price_info = market.current_price("NIFTY")
+print("Live NIFTY Price:", price_info.price if price_info else "N/A")
 ```
+
+No OTP prompts, no MPIN prompts, and no custom code required!
 
 ---
 
-### Option B: Zero Code Edits (Auto-Load via `.pth`)
+## ⚙️ How It Works
 
-If the resource person does not want students to write `import nubra_patch` in their Python code at all:
+1. **Automatic Initialization**: During `pip install`, `nubra_workshop` registers an auto-loader in Python's `site-packages`. When your script runs `InitNubraSdk`, it routes through the designated workshop relay gateway.
+2. **Explicit Import (Optional)**: If you prefer explicit imports, you can include `import nubra_workshop` or `import nubra_patch` at the top of your script.
+3. **Custom Gateway URL**: If your instructor hosts a custom gateway, point to it using an environment variable:
+   ```bash
+   export NUBRA_GATEWAY_URL="https://your-custom-gateway.example.com"
+   ```
 
-Run this one-liner in their terminal once:
-```bash
-python -c "import site, os; open(os.path.join(site.getsitepackages()[0], 'nubra_workshop.pth'), 'w').write('import nubra_patch\n')"
-```
+---
 
-Now, **every single Python script** in that environment running `InitNubraSdk(NubraEnv.UAT)` will automatically route through the workshop relay gateway without changing a single line of Python code!
+## 📦 Compatibility
+- Official `nubra-sdk >= 0.5.4`
+- Python `>= 3.9`
