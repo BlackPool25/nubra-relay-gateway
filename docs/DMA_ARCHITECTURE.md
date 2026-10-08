@@ -129,15 +129,23 @@ A strict Default-Deny router protects account security while maintaining open ac
 
 | Path / Pattern | HTTP Method | Policy | Upstream Action | Caching Strategy |
 | :--- | :--- | :--- | :--- | :--- |
-| `/report/*`, `/report`, `/userinfo`, `/profile` | ANY | **BLOCKED (403)** | Dropped immediately; zero upstream egress | N/A |
+| `/report/*` | ANY | **BLOCKED (403)** | Dropped immediately; zero upstream egress | N/A |
+| `/profile`, `/userinfo` (upstream) | ANY | **BLOCKED / MOCKED** | `/userinfo` returns relay WS URLs only; never forwards master PII | N/A |
+| `/logout` | POST | **MOCKED LOCALLY** | Returns `{"msg": "Logout successful"}`; never forwarded upstream | N/A |
+| `/sendphoneotp`, `/verifyphoneotp`, `/verifypin`, `/totp/*`, `/login-insti`, `/api-keys/login`, `/reset_password`, `/ipaddress/*` | ANY | **BLOCKED (403)** | OTP/MPIN flows would invalidate shared session | N/A |
+| `/depository/*` | ANY | **BLOCKED (403)** | eDIS/CDSL browser flow is per-account, unsafe shared | N/A |
 | `/trading/exit-all-positions`, `/trading/orders/cancel-all` | POST, DELETE | **BLOCKED (403)** | Dropped to prevent mass workshop disruption | N/A |
-| `/instruments`, `/instruments/*` | GET | **ALLOWED** | Relayed with master credentials | **Cached (1 Hour)** |
-| `/orderbooks/{ref_id}`, `/quotes/{ref_id}` | GET | **ALLOWED** | Relayed with master credentials | **Cached (1 - 2 Seconds)** |
-| `/historical-data/*` | GET | **ALLOWED** | Relayed with rate limiter | **Cached (60 Seconds)** |
-| `/sentinel/orders`, `/trading/orders` | GET | **ALLOWED** | Direct passthrough | **No-Cache** |
-| `/sentinel/orders/create`, `/trading/orders/place` | POST | **ALLOWED** | Rate-queued passthrough | **No-Cache** |
-| `/sentinel/orders/modify`, `/sentinel/orders/cancel` | POST | **ALLOWED** | Rate-queued passthrough | **No-Cache** |
-| `/sentinel/orders/funds_required` | POST | **ALLOWED** | Direct passthrough | **Cached (30 Seconds per payload hash)** |
+| `/refdata/refdata/{YYYY-MM-DD}?exchange=NSE\|BSE\|MCX` | GET | **ALLOWED** | Relayed with master credentials | **Cached (1 Hour)** |
+| `/orderbooks/{ref_id}?levels=` | GET | **ALLOWED** | Relayed with master credentials | **Cached (1.5 Seconds)** |
+| `/optionchains/{asset}`, `/optionchains/{asset}/price` | GET | **ALLOWED** | Relayed with master credentials | **Cached (1 Second)** |
+| `/charts/timeseries`, `/charts/multistrike` | POST | **ALLOWED** | Relayed with historical-bucket limiter | **Not cached (POST)** |
+| `/screener/fetch_company_fundamentals*` | GET | **ALLOWED** | Relayed with master credentials | **Cached (2 Seconds default)** |
+| `/sentinel/orders?intentOrderId=...` | GET | **ALLOWED** | Direct passthrough | **No-Cache** |
+| `/sentinel/orders/create`, `/sentinel/orders/modify`, `/sentinel/orders/cancel` | POST | **ALLOWED** | Redis FIFO queue (BRPOPLPUSH + ACK + retry) | **No-Cache** |
+| `/sentinel/orders/funds_required` | POST | **ALLOWED** | Direct passthrough | **No-Cache** |
+| `/sentinel/portfolio/positions\|holdings\|user_funds_and_margin` | GET | **ALLOWED** | Direct passthrough | **No-Cache** |
+| `/sentinel/strategy-portfolio*` | GET/POST/DELETE | **ALLOWED** | Direct passthrough | **No-Cache** |
+| `/ws`, `/apibatch/ws`, `/oms-socket-latest/ws` | WS | **ALLOWED** | Bidirectional proxy; student token swapped for master token | N/A |
 
 ---
 
@@ -147,43 +155,47 @@ The gateway directly supports the canonical Nubra V3 data models. All request an
 
 ### 5.1. Order Placement Schema (`POST /sentinel/orders/create`)
 
+V3 uses the `orders[]` wrapper with camelCase fields and integer `intentOrderId`
+(see `references/nubra-sdk-package/trading/validation.py: CreateIntentOrderRequest`).
+Prices are exchange-native integers (paise for NSE).
+
 #### Inbound Request Body
 ```json
 {
-  "refId": 97713,
-  "transactionType": "TRANSACTION_TYPE_BUY",
-  "orderType": "ORDER_TYPE_LIMIT",
-  "deliveryType": "ORDER_DELIVERY_TYPE_IDAY",
-  "validityType": "ORDER_VALIDITY_TYPE_DAY",
-  "unitQty": 10,
-  "entryPrice": 450.50,
-  "disclosedQty": 0,
-  "isMultiLeg": false,
-  "intentOrderId": "ord_usr_10203"
+  "orders": [
+    {
+      "refId": 97713,
+      "qty": 10,
+      "side": "BUY",
+      "deliveryType": "IDAY",
+      "priceType": "LIMIT",
+      "validityType": "DAY",
+      "executionMode": "ENTRY",
+      "entryPrice": 45050,
+      "isMultiLeg": false,
+      "stratTags": ["workshop"]
+    }
+  ]
 }
 ```
 
 #### Field Specifications:
-* `refId` *(integer, required)*: Nubra unique instrument identification number.
-* `transactionType` *(string, required)*: `TRANSACTION_TYPE_BUY` | `TRANSACTION_TYPE_SELL`.
-* `orderType` *(string, required)*: `ORDER_TYPE_LIMIT` | `ORDER_TYPE_MARKET` | `ORDER_TYPE_SL` | `ORDER_TYPE_SLM`.
-* `deliveryType` *(string, required)*: `ORDER_DELIVERY_TYPE_IDAY` (Intraday) | `ORDER_DELIVERY_TYPE_DELV` (Delivery).
-* `validityType` *(string, required)*: `ORDER_VALIDITY_TYPE_DAY` | `ORDER_VALIDITY_TYPE_IOC`.
-* `unitQty` *(integer, required)*: Quantity of shares/contracts.
-* `entryPrice` *(float, optional)*: Limit price (required for `ORDER_TYPE_LIMIT` and `ORDER_TYPE_SL`).
-* `triggerPrice` *(float, optional)*: Stop trigger price (required for stop loss orders).
-* `intentOrderId` *(string, optional)*: Client-specified correlation identifier.
+* `orders[]` *(array, required)*: one entry per single order; strategy orders use one entry with `isMultiLeg: true` + `legs[]`.
+* `refId` *(integer)*: required for single-leg; absent for multi-leg (legs carry `refId` + `unitQty`).
+* `side` *(string)*: `BUY` | `SELL` (multi-leg entry must not be `SELL`).
+* `deliveryType` *(string)*: `IDAY` | `CNC`.
+* `priceType` *(string)*: `LIMIT` | `MARKET`.
+* `validityType` *(string)*: `DAY` | `IOC` | `GTE`.
+* `qty` *(integer, required)*: quantity in lots/units.
+* `entryPrice` *(integer, optional)*: paise for NSE limit orders.
+* `orderId` *(integer, optional)*: strategy-level `intentOrderId` for modify/cancel.
+* `stratTags` *(string[])*: hyphen-separated tags only.
 
 #### Upstream Success Response (`200 OK`)
 ```json
 {
-  "status": "success",
-  "data": {
-    "orderId": "NB261007000142",
-    "intentOrderId": "ord_usr_10203",
-    "status": "SUBMITTED",
-    "timestamp": "2026-10-07T17:28:40.124Z"
-  }
+  "intentOrderId": 987654,
+  "orderStatus": "INTENT_ORDER_STATUS_OPEN"
 }
 ```
 
@@ -192,52 +204,48 @@ The gateway directly supports the canonical Nubra V3 data models. All request an
 ### 5.2. Order Retrieval Schema (`GET /sentinel/orders`)
 
 #### Response Body (`200 OK`)
+V3 returns `{orders: {<bucket>: [...]}}` keyed by status bucket — not `{status, data: [...]}`.
 ```json
 {
-  "status": "success",
-  "data": [
-    {
-      "orderId": "NB261007000142",
-      "intentOrderId": "ord_usr_10203",
-      "refId": 97713,
-      "symbol": "TCS",
-      "transactionType": "TRANSACTION_TYPE_BUY",
-      "orderType": "ORDER_TYPE_LIMIT",
-      "unitQty": 10,
-      "filledQty": 10,
-      "pendingQty": 0,
-      "averagePrice": 450.50,
-      "status": "COMPLETE",
-      "exchange": "NSE",
-      "placedAt": "2026-10-07T17:28:40.124Z"
-    }
-  ]
+  "orders": {
+    "open": [
+      {
+        "intentOrderId": 987654,
+        "refId": 97713,
+        "orderStatus": "INTENT_ORDER_STATUS_OPEN",
+        "orderSide": "BUY",
+        "orderQty": 10,
+        "filledQty": 0,
+        "orderPrice": 45050
+      }
+    ],
+    "executed": [],
+    "cancelled": [],
+    "rejected": []
+  }
 }
 ```
 
 ---
 
-### 5.3. Market Depth Schema (`GET /orderbooks/{ref_id}`)
+### 5.3. Market Depth Schema (`GET /orderbooks/{ref_id}?levels=`)
 
 #### Response Body (`200 OK`)
+Field names follow the SDK wrapper (`OrderBookWrapper`): `ref_id`, `last_traded_price`,
+`bids[]`/`asks[]` with `{price, quantity, num_orders}`. Prices are paise integers.
 ```json
 {
-  "status": "success",
-  "data": {
-    "refId": 97713,
-    "lastTradedPrice": 450.75,
-    "totalTradedVolume": 1284500,
-    "bids": [
-      { "price": 450.50, "quantity": 150, "orders": 3 },
-      { "price": 450.25, "quantity": 300, "orders": 5 },
-      { "price": 450.00, "quantity": 800, "orders": 12 }
-    ],
-    "asks": [
-      { "price": 450.75, "quantity": 220, "orders": 4 },
-      { "price": 451.00, "quantity": 410, "orders": 6 },
-      { "price": 451.25, "quantity": 650, "orders": 9 }
-    ]
-  }
+  "ref_id": 97713,
+  "timestamp": 1760364520123,
+  "last_traded_price": 45075,
+  "last_traded_quantity": 50,
+  "volume": 1284500,
+  "bids": [
+    { "price": 45050, "quantity": 150, "num_orders": 3 }
+  ],
+  "asks": [
+    { "price": 45075, "quantity": 220, "num_orders": 4 }
+  ]
 }
 ```
 
@@ -289,11 +297,11 @@ When multiple concurrent requests experience a cache miss for the same endpoint,
 
 | Endpoint Type | Cache Key Format | Storage Engine | TTL | Strategy |
 | :--- | :--- | :--- | :--- | :--- |
-| **Instrument Master** | `nubra_cache:instruments:master` | Redis / Memory | 3600s (1 hr) | Long-lived static payload |
-| **Market Depth / Orderbook**| `nubra_cache:ref:{refId}:depth` | Redis / Memory | 1.5s | Micro-cache with single-flight |
-| **Quotes & LTP** | `nubra_cache:ref:{refId}:quotes`| Redis / Memory | 1.0s | Micro-cache |
-| **Historical Candles** | `nubra_cache:hist:{refId}:{hash}`| Redis / Memory | 60.0s | Medium-lived idempotent query |
-| **Active Orders Listing** | `nubra_cache:orders:{query_hash}`| Redis / Memory | 0.5s | Micro-cache with instant purge |
+| **Instrument Master** | `nubra_cache:instruments:refdata/...` | Redis / Memory | 3600s (1 hr) | Long-lived static payload |
+| **Market Depth / Orderbook**| `nubra_cache:ref:{refId}:orderbooks/...` | Redis / Memory | 1.5s | Micro-cache with single-flight |
+| **Quotes / Option Chain** | `nubra_cache:ref:{refId}:optionchains/...` or `gen:{hash}` | Redis / Memory | 1.0s | Micro-cache |
+| **Historical Candles** | `nubra_cache:gen:{hash}` (`charts/*`, POST never cached) | Redis / Memory | 60.0s | Medium-lived idempotent query |
+| **Active Orders / Portfolio / Strategy** | No-cache passthrough | N/A | 0s | Always live; never stored |
 | **Margin Estimation** | `nubra_cache:funds:{hash}` | Redis / Memory | 15.0s | Purged on trade mutation |
 
 ### 6.3. Strict Mutation Policy (POST/PUT/DELETE Never Cached)
@@ -328,7 +336,7 @@ Upstream Nubra limits are enforced per IP address. The gateway models outbound e
 ### 7.2. Dual-Bucket Architecture & Route Classification
 Incoming requests are classified before reaching the egress queue:
 ```
-Inbound Request ──► [Path Inspection] ──┬──► /historical-data/* ──► [Tier 2: 50 req/min Bucket] ──► Upstream Nubra
+Inbound Request ──► [Path Inspection] ──┬──► /historical-data/*, /charts/* ──► [Tier 2: 50 req/min Bucket] ──► Upstream Nubra
                                          └──► All Other Routes  ──► [Tier 1: 85 ops/sec Bucket]  ──► Upstream Nubra
 ```
 
@@ -338,7 +346,7 @@ Inbound Request ──► [Path Inspection] ──┬──► /historical-data/
 ### 7.3. Storage Engines & 429 Backoff Resilience
 * **Distributed Redis Token Bucket:** Utilizes Redis `EVAL` with atomic Lua scripts to maintain token count and replenish tokens smoothly across worker threads.
 * **Local In-Memory Fallback:** When Redis is offline, seamlessly engages `LocalTokenBucket` instances with micro-sleep intervals.
-* **Upstream 429 & Retry-After Propagation:** If an unexpected upstream 429 is encountered, the gateway parses the `Retry-After` header, temporarily halts bucket dispatch, and relays the header to client applications.
+* **Upstream 429 & Retry-After Handling:** Direct passthrough retries once after honoring `Retry-After` via `rate_limiter.penalize()`; the queue worker retries 429s with backoff. `Retry-After` is relayed to clients in response headers.
 
 ---
 
@@ -383,8 +391,8 @@ ENABLE_STUDENT_VERIFICATION=false
 
 When `ENABLE_STUDENT_VERIFICATION=true`:
 1. Request token must match an active student record.
-2. If `status != "ACTIVE"`, request is rejected with `403 Forbidden` (`STUDENT_SUSPENDED`).
-3. Individual per-student rate limits are tracked in Redis/memory.
+2. If `status != "ACTIVE"`, request is rejected with `401 Unauthorized` (`INVALID_TOKEN`).
+3. No per-student rate limits are enforced — upstream buckets are shared globally.
 
 When `ENABLE_STUDENT_VERIFICATION=false` (Default):
 1. Any token conforming to the configured workshop prefix or in `.env` `ALLOWED_STUDENT_TOKENS` is admitted immediately.
@@ -428,7 +436,7 @@ The gateway runs the official `tailscale/tailscale:latest` container alongside t
 To protect master credentials on the host PC:
 1. **Interactive Host Script (`scripts/setup_credentials.py`):**
    * Prompts the workshop organizer for Nubra UAT `session_token`, `x-device-id`, and optional `TS_AUTHKEY`.
-   * Performs an immediate pre-flight connectivity check to `https://uatapi.nubra.io/instruments` to verify token validity before starting containers.
+   * Performs an immediate pre-flight connectivity check to `https://uatapi.nubra.io/refdata/refdata/{today}?exchange=NSE` to verify token validity before starting containers.
    * Generates student tokens and writes an isolated `.env` file with restrictive file permissions (`chmod 600`).
 2. **Container Isolation:**
    * Relay container runs under an unprivileged user (`appuser`, UID 1000).

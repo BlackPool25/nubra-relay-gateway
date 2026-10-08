@@ -22,6 +22,68 @@ async def close_http_client():
     if client_pool:
         await client_pool.aclose()
 
+
+def _is_queued_order_write(method: str, path: str) -> bool:
+    if not settings.ENABLE_REDIS_QUEUE or method.upper() not in ("POST", "PUT", "PATCH", "DELETE"):
+        return False
+    clean = "/" + path.lower().lstrip("/")
+    return clean.startswith("/sentinel/orders")
+
+
+def _retry_after_seconds(value) -> float:
+    try:
+        return max(0.5, min(10.0, float(value))) if value is not None else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _extract_ref_ids(body: bytes) -> list:
+    """Collect refIds from flat, orders[], and legs[] V3 payload shapes."""
+    found: list = []
+    if not body:
+        return found
+    try:
+        data = json.loads(body)
+    except Exception:
+        return found
+    candidates = [data] if isinstance(data, dict) else data if isinstance(data, list) else []
+    stack = list(candidates)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key in ("refId", "ref_id"):
+                if node.get(key) is not None:
+                    found.append(node[key])
+            for key in ("orders", "legs"):
+                items = node.get(key)
+                if isinstance(items, list):
+                    stack.extend(items)
+        elif isinstance(node, list):
+            stack.extend(node)
+    seen = []
+    for r in found:
+        if r not in seen:
+            seen.append(r)
+    return seen
+
+
+async def _dispatch_via_queue(request, path: str, student_id: str, query_params: dict, body: bytes):
+    try:
+        from app.order_queue import order_queue
+        headers = {"content-type": request.headers.get("content-type", "application/json")}
+        return await order_queue.enqueue_and_wait(
+            method=request.method,
+            path=path,
+            student_id=student_id,
+            query_params=query_params,
+            body=body,
+            headers=headers,
+            timeout=float(settings.QUEUE_TIMEOUT_SECONDS),
+        )
+    except Exception as exc:
+        print(f"[Proxy] Queue dispatch failed, falling back to direct: {exc}")
+        return None
+
 async def relay_request(request: Request, path: str) -> Response:
     # 1. Security & Blacklist Check
     check_path_permission(path)
@@ -29,11 +91,42 @@ async def relay_request(request: Request, path: str) -> Response:
     # 2. Transparent Student Authentication
     student_id = authenticate_student(request)
 
-    # 3. Cache Evaluation: STRICTLY for GET/HEAD requests only
+    # 2b. Safe-intercept session endpoints: NEVER forward master token.
+    # Student logout must only clear local state, never kill shared UAT session.
+    clean = "/" + path.lower().lstrip("/").split("?")[0]
+    if request.method == "POST" and (clean == "/logout" or clean.endswith("/logout")):
+        return Response(
+            content=json.dumps({"msg": "Logout successful"}),
+            status_code=200,
+            headers={"content-type": "application/json", "X-Workshop-Student": student_id},
+            media_type="application/json",
+        )
+    if request.method == "GET" and (clean == "/userinfo" or clean.endswith("/userinfo")):
+        base = str(request.base_url).rstrip("/")
+        ws_base = base.replace("https://", "wss://").replace("http://", "ws://")
+        return Response(
+            content=json.dumps({
+                "message": "workshop session",
+                "student_id": student_id,
+                "env_info": {
+                    "user_ws_url": f"{ws_base}/ws",
+                    "market_ws_url": f"{ws_base}/apibatch/ws",
+                    "order_service_ws_url": f"{ws_base}/oms-socket-latest/ws",
+                },
+            }),
+            status_code=200,
+            headers={"content-type": "application/json", "X-Workshop-Student": student_id},
+            media_type="application/json",
+        )
+
+    # 3. Cache Evaluation: STRICTLY for GET/HEAD requests only, never for
+    # live trading/portfolio state (orders, positions, holdings, strategy).
     is_safe_method = request.method in ("GET", "HEAD")
+    no_cache = cache_manager.is_no_cache_path(path)
     body = await request.body()
     query_params = dict(request.query_params)
-    cache_key = cache_manager.generate_cache_key(request.method, path, query_params, body) if is_safe_method else None
+    cache_key = (cache_manager.generate_cache_key(request.method, path, query_params, body)
+                 if (is_safe_method and not no_cache) else None)
 
     if is_safe_method and cache_key:
         cached = await cache_manager.get(cache_key)
@@ -51,10 +144,11 @@ async def relay_request(request: Request, path: str) -> Response:
 
     # 4. Define Fetch Function for Upstream Call
     clean_path = path.lower()
-    category = "historical" if "historical" in clean_path else "general"
+    category = "historical" if ("historical" in clean_path or "charts/" in clean_path) else "general"
 
     async def fetch_upstream():
-        # Enforce rate limiter queue matching Nubra limits
+        # Enforce rate limiter queue matching Nubra limits, retry once on 429
+        # honoring Retry-After so bursts back off instead of failing students.
         await rate_limiter.acquire(category=category)
 
         # Build upstream URL
@@ -64,6 +158,9 @@ async def relay_request(request: Request, path: str) -> Response:
         upstream_headers = {
             "Authorization": f"Bearer {settings.NUBRA_SESSION_TOKEN}",
             "x-device-id": settings.NUBRA_DEVICE_ID,
+            "x-device-os": "sdk",
+            "x-app-version": "0.5.4",
+            "Cookie": f"deviceId={settings.NUBRA_DEVICE_ID}",
             "Accept": request.headers.get("Accept", "application/json"),
         }
         if "content-type" in request.headers:
@@ -77,6 +174,17 @@ async def relay_request(request: Request, path: str) -> Response:
                 params=query_params,
                 content=body if not is_safe_method else None
             )
+            if resp.status_code == 429:
+                delay = _retry_after_seconds(resp.headers.get("retry-after"))
+                await rate_limiter.penalize(category=category, delay=delay)
+                await rate_limiter.acquire(category=category)
+                resp = await client_pool.request(
+                    method=request.method,
+                    url=upstream_url,
+                    headers=upstream_headers,
+                    params=query_params,
+                    content=body if not is_safe_method else None
+                )
             return resp.status_code, resp.content, dict(resp.headers)
         except httpx.RequestError as exc:
             raise HTTPException(
@@ -88,9 +196,13 @@ async def relay_request(request: Request, path: str) -> Response:
                 }
             )
 
-    # 5. Dispatch Request: Single-Flight Coalescing for GET; Direct for Mutations
+    # 5. Dispatch Request: Single-Flight Coalescing for GET; Queue for order writes; Direct otherwise
     if is_safe_method and cache_key:
         result = await cache_manager.coalescer.execute_or_wait(cache_key, fetch_upstream)
+    elif not is_safe_method and _is_queued_order_write(request.method, path):
+        result = await _dispatch_via_queue(request, path, student_id, query_params, body)
+        if result is None:
+            result = await fetch_upstream()
     else:
         result = await fetch_upstream()
 
@@ -110,18 +222,11 @@ async def relay_request(request: Request, path: str) -> Response:
     elif not is_safe_method and status_code in (200, 201, 202, 204):
         # A mutating request (POST, PUT, DELETE) succeeded!
         # Perform event-driven invalidation to prevent stale reads
-        ref_id = None
-        if body:
-            try:
-                body_json = json.loads(body)
-                if isinstance(body_json, dict):
-                    ref_id = body_json.get("refId") or body_json.get("ref_id")
-            except Exception:
-                pass
+        ref_ids = _extract_ref_ids(body)
 
         clean_path = path.lower()
-        if "orders" in clean_path or "funds" in clean_path:
-            await cache_manager.invalidate_trade_state(ref_id=ref_id)
+        if "orders" in clean_path or "funds" in clean_path or "portfolio" in clean_path:
+            await cache_manager.invalidate_trade_state(ref_ids=ref_ids)
 
     # 7. Return verbatim response to student
     resp_headers = {

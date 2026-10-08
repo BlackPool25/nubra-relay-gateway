@@ -76,6 +76,19 @@ class DualRateLimiter:
 
         await local_bucket.acquire()
 
+    async def penalize(self, category: str = "general", delay: float = 1.0):
+        """Back off after an upstream 429 so the next acquire waits out Retry-After."""
+        bucket = self.historical_bucket if category == "historical" else self.general_bucket
+        async with bucket._lock:
+            bucket.tokens = min(bucket.tokens, 0.0)
+            bucket.last_update = time.monotonic() + max(0.0, delay)
+        if self.redis:
+            try:
+                key = "rate_limit:upstream:historical" if category == "historical" else "rate_limit:upstream:general"
+                await self.redis.hset(key, mapping={"tokens": 0, "last": int(time.time() * 1000) + int(delay * 1000)})
+            except Exception:
+                pass
+
     async def _acquire_redis(self, key: str, capacity: float, rate: float) -> bool:
         lua_script = """
         local key = KEYS[1]
@@ -108,13 +121,13 @@ class DualRateLimiter:
         end
         """
         now_ms = int(time.time() * 1000)
-        res = await self.redis.eval(lua_script, 1, key, capacity, rate, now_ms)
-        if res == 1:
-            return True
-
-        # Sleep small interval if throttled
-        wait_interval = max(0.01, 1.0 / rate if rate > 0 else 0.1)
-        await asyncio.sleep(min(1.0, wait_interval))
-        return True
+        # Block until a token is available instead of leaking through on throttle.
+        while True:
+            res = await self.redis.eval(lua_script, 1, key, capacity, rate, now_ms)
+            if res == 1:
+                return True
+            wait_interval = max(0.01, 1.0 / rate if rate > 0 else 0.1)
+            await asyncio.sleep(min(1.0, wait_interval))
+            now_ms = int(time.time() * 1000)
 
 rate_limiter = DualRateLimiter()

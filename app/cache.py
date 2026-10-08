@@ -100,15 +100,28 @@ class CacheManager:
 
     def get_ttl_for_path(self, path: str) -> float:
         clean_path = path.lower().lstrip("/")
-        if clean_path.startswith("instruments"):
+        if clean_path.startswith(("instruments", "refdata")):
             return settings.CACHE_TTL_INSTRUMENTS
         elif clean_path.startswith("orderbooks"):
             return settings.CACHE_TTL_ORDERBOOK
-        elif clean_path.startswith("quotes"):
+        elif clean_path.startswith(("quotes", "optionchains")):
             return settings.CACHE_TTL_QUOTES
-        elif clean_path.startswith("historical-data"):
+        elif clean_path.startswith(("historical-data", "charts/")):
             return settings.CACHE_TTL_HISTORICAL
+        elif "sentinel/orders" in clean_path:
+            return 0.5
+        elif "funds" in clean_path or "margin" in clean_path:
+            return 15.0
         return settings.CACHE_TTL_DEFAULT
+
+    @staticmethod
+    def is_no_cache_path(path: str) -> bool:
+        clean = "/" + path.lower().lstrip("/")
+        return clean.startswith((
+            "/sentinel/orders",
+            "/sentinel/portfolio",
+            "/sentinel/strategy-portfolio",
+        ))
 
     async def get(self, key: str) -> Optional[Tuple[int, bytes, Dict[str, str]]]:
         if not settings.ENABLE_CACHE:
@@ -161,14 +174,19 @@ class CacheManager:
         expiry = time.time() + ttl
         self._in_memory_store[key] = (expiry, content, status_code, safe_headers)
 
-    async def invalidate_trade_state(self, ref_id: Optional[Any] = None):
+    async def invalidate_trade_state(self, ref_id: Optional[Any] = None, ref_ids: Optional[list] = None):
         """
         Event-driven cache invalidation triggered whenever an order is placed, modified, or cancelled.
         Purges active orders, funds/margin estimates, and affected symbol depth.
+        Trading/portfolio GETs are no-cache passthrough, but gen:* keys from
+        strategy/portfolio reads are purged defensively.
         """
-        patterns = ["nubra_cache:orders*", "nubra_cache:funds*"]
+        ids = list(ref_ids or [])
         if ref_id is not None:
-            patterns.append(f"nubra_cache:ref:{ref_id}*")
+            ids.append(ref_id)
+        patterns = ["nubra_cache:orders*", "nubra_cache:funds*", "nubra_cache:gen*"]
+        for rid in ids:
+            patterns.append(f"nubra_cache:ref:{rid}*")
 
         # 1. Invalidate Redis
         if self.redis:
@@ -196,7 +214,7 @@ class CacheManager:
         for k in keys_to_delete:
             self._in_memory_store.pop(k, None)
 
-        print(f"[Cache] Invalidated trade state cache (refId={ref_id}, purged {len(keys_to_delete)} in-mem keys).")
+        print(f"[Cache] Invalidated trade state cache (refIds={ids}, purged {len(keys_to_delete)} in-mem keys).")
 
 
 cache_manager = CacheManager()

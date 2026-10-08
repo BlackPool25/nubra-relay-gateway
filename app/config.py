@@ -27,14 +27,34 @@ class Settings(BaseSettings):
     CACHE_TTL_HISTORICAL: float = 60.0
     CACHE_TTL_DEFAULT: float = 2.0
 
-    # Strict Blocklist (Blocked with 403 Forbidden)
+    # WebSocket Configuration
+    NUBRA_UAT_WS_BASE: str = "wss://uatapi.nubra.io"
+
+    # Redis Message Queue Configuration (Guarantees zero dropped orders during traffic spikes)
+    ENABLE_REDIS_QUEUE: bool = True
+    QUEUE_TIMEOUT_SECONDS: int = 25
+    REDIS_QUEUE_URL: str = ""  # when empty, reuses REDIS_URL connection
+
+    # Strict Blocklist (Blocked with 403 Forbidden to protect account safety)
+    # Note: /userinfo and /logout are safe-intercepted and mocked in proxy.py instead of hard-blocked.
     BLOCKED_PREFIXES: List[str] = [
         "/report",
-        "/userinfo",
         "/profile",
-        "/account",
         "/trading/exit-all-positions",
         "/trading/orders/cancel-all",
+        # Auth/session endpoints: must never reach upstream with master token.
+        # Students use pre-issued STU_* tokens; OTP/MPIN/TOTP flows would
+        # invalidate or hang the shared master session.
+        "/sendphoneotp",
+        "/verifyphoneotp",
+        "/verifypin",
+        "/totp",
+        "/login-insti",
+        "/api-keys/login",
+        "/reset_password",
+        "/ipaddress",
+        # eDIS browser/CDSL flow is per-account and unsafe to share.
+        "/depository",
     ]
 
     @property

@@ -14,8 +14,11 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - REDIS_QUEUE_URL=redis://redis-queue:6379/0
     depends_on:
       redis:
+        condition: service_healthy
+      redis-queue:
         condition: service_healthy
     networks:
       - internal_net
@@ -31,6 +34,25 @@ services:
       --appendonly no
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
+    networks:
+      - internal_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2b. Dedicated Redis for order queue: persisted + never evicts jobs.
+  redis-queue:
+    image: redis:7-alpine
+    container_name: nubra_relay_redis_queue
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory-policy noeviction
+    volumes:
+      - redis_queue_data:/data
     networks:
       - internal_net
     healthcheck:
@@ -69,3 +91,4 @@ networks:
 
 volumes:
   tailscale_state:
+  redis_queue_data:

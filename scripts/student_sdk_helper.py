@@ -23,7 +23,14 @@ def get_relay_client(
     Bypasses interactive OTP and MPIN terminal login prompts.
     """
     client = InitNubraSdk.__new__(InitNubraSdk)
-    client.API_BASE_URL = relay_url.rstrip("/")
+    base = relay_url.rstrip("/")
+    client.API_BASE_URL = base
+    # Point SDK sockets at the relay so NubraDataSocket/OrderUpdate work
+    # without touching Nubra directly. ws:// for local, wss:// for funnel.
+    ws_base = base.replace("https://", "wss://").replace("http://", "ws://")
+    client.WEBSOCKET_URL = f"{ws_base}/ws"
+    client.WEBSOCKET_URL_BATCH = f"{ws_base}/apibatch/ws"
+    client.WEBSOCKET_URL_OMS = f"{ws_base}/oms-socket-latest/ws"
     client.db_path = "auth_data.db"
     client.totp_login = False
     client.token_data = {
@@ -40,7 +47,9 @@ def get_relay_client(
         "x-device-id": device_id,
     }
     InitNubraSdk.HEADERS = headers
+    InitNubraSdk.BEARER_TOKEN = student_token
     client.HEADERS = headers
+    client.BEARER_TOKEN = student_token
     return client
 
 def get_nubra_trader(

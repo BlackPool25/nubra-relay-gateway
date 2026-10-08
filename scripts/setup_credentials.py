@@ -43,10 +43,10 @@ def http_post(url: str, data: dict, headers: dict = None) -> Tuple[int, dict, di
 
 def interactive_nubra_login(base_url: str) -> Optional[Tuple[str, str]]:
     """
-    Executes Nubra REST API v3 4-step login sequence:
-    Step 1 & 2: /sendphoneotp -> generate OTP
-    Step 3: /verifyphoneotp -> get auth_token
-    Step 4: /verifypin -> get session_token
+    Executes Nubra REST API v3 login sequence:
+    Step 1: /sendphoneotp -> dispatch SMS OTP
+    Step 2: /verifyphoneotp -> get auth_token
+    Step 3: /verifypin -> get session_token
     """
     print("\n--- Nubra UAT Interactive Terminal Login ---")
     phone = input("Enter registered mobile number: ").strip()
@@ -56,97 +56,158 @@ def interactive_nubra_login(base_url: str) -> Optional[Tuple[str, str]]:
 
     device_id = input("Choose device ID for this session [default: workshop-pc]: ").strip() or "workshop-pc"
 
-    # Step 1: Initial OTP generation request
-    print("\n[Step 1/4] Initiating login flow with Nubra...")
-    code, resp, _ = http_post(f"{base_url}/sendphoneotp", {"phone": phone})
-    temp_token = resp.get("temp_token") or (resp.get("data", {}).get("temp_token") if isinstance(resp.get("data"), dict) else None)
-    if code != 200 or not temp_token:
-        print(f"[!] Step 1 failed (HTTP {code}): {resp.get('message', resp)}")
-        return None
+    common_headers = {
+        "x-device-id": device_id,
+        "x-device-os": "sdk",
+        "x-app-version": "0.5.4",
+        "Cookie": f"deviceId={device_id}",
+    }
 
-    # Step 2: Trigger OTP send with x-temp-token
-    print("[Step 2/4] Requesting OTP dispatch to your phone...")
+    # Step 1: Request OTP dispatch
+    print("\n[Step 1/3] Requesting OTP dispatch from Nubra...")
     code, resp, _ = http_post(
         f"{base_url}/sendphoneotp",
-        {"phone": phone},
-        headers={"x-temp-token": temp_token}
+        {"phone": phone, "flow": "", "skip_totp": False},
+        headers=common_headers
     )
-    if code != 200:
-        print(f"[!] Step 2 failed (HTTP {code}): {resp.get('message', resp)}")
+    temp_token = resp.get("temp_token") or (resp.get("data", {}).get("temp_token") if isinstance(resp.get("data"), dict) else None)
+    next_step = resp.get("next") or (resp.get("data", {}).get("next") if isinstance(resp.get("data"), dict) else "")
+
+    if code not in (200, 201) or not temp_token:
+        err_msg = resp.get("error") or resp.get("message") or resp
+        print(f"[!] Step 1 failed (HTTP {code}): {err_msg}")
         return None
 
-    temp_token = resp.get("temp_token") or temp_token
-    print(f"  ✓ {resp.get('message', 'OTP dispatched successfully!')}")
+    # If the account has TOTP enabled, skip TOTP to trigger SMS OTP
+    if next_step == "VERIFY_TOTP":
+        print("  • Account prompted for TOTP. Dispatching SMS OTP fallback...")
+        code, resp, _ = http_post(
+            f"{base_url}/sendphoneotp",
+            {"phone": phone, "flow": "", "skip_totp": True},
+            headers={"x-temp-token": temp_token, **common_headers}
+        )
+        temp_token = resp.get("temp_token") or temp_token
+        if code not in (200, 201):
+            err_msg = resp.get("error") or resp.get("message") or resp
+            print(f"[!] SMS OTP fallback dispatch failed (HTTP {code}): {err_msg}")
+            return None
 
-    # Step 3: Verify OTP
-    otp = input("\nEnter the OTP received on SMS: ").strip()
-    if not otp:
-        print("[!] OTP cannot be empty.")
-        return None
+    print(f"  ✓ OTP dispatched successfully to {phone}")
 
-    print("\n[Step 3/4] Verifying OTP with Nubra...")
-    code, resp, resp_hdrs = http_post(
-        f"{base_url}/verifyphoneotp",
-        {"phone": phone, "otp": otp},
-        headers={"x-temp-token": temp_token, "x-device-id": device_id}
-    )
-    
-    # Flexible token extraction across all possible Nubra response shapes
-    data_dict = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-    auth_token = (
-        resp.get("auth_token")
-        or resp.get("token")
-        or resp.get("temp_token")
-        or data_dict.get("auth_token")
-        or data_dict.get("token")
-        or resp_hdrs.get("x-auth-token")
-        or resp_hdrs.get("authorization")
-    )
+    # Step 2: Verify OTP (allows 3 attempts)
+    auth_token = None
+    for attempt in range(3):
+        otp = input("\nEnter the OTP received on SMS: ").strip()
+        if not otp:
+            print("[!] OTP cannot be empty.")
+            continue
 
-    if code != 200 or not auth_token:
-        print(f"[!] Step 3 failed (HTTP {code}): {resp.get('message', resp)}")
-        print(f"    Payload received: {resp}")
-        return None
+        print("\n[Step 2/3] Verifying OTP with Nubra...")
+        code, resp, resp_hdrs = http_post(
+            f"{base_url}/verifyphoneotp",
+            {"phone": phone, "otp": otp},
+            headers={"x-temp-token": temp_token, **common_headers}
+        )
 
-    print(f"  ✓ {resp.get('message', 'OTP verified successfully.')}")
+        # Flexible token extraction across all possible Nubra response shapes
+        data_dict = resp.get("data") if isinstance(resp.get("data"), dict) else {}
 
-    # Step 4: Verify MPIN
-    pin = getpass.getpass("\nEnter your 4-digit MPIN: ").strip()
-    if not pin:
-        print("[!] MPIN cannot be empty.")
-        return None
+        header_auth = None
+        for k, v in resp_hdrs.items():
+            if k.lower() in ("authorization", "x-auth-token", "auth-token"):
+                header_auth = v.replace("Bearer ", "").strip()
+                break
 
-    print("\n[Step 4/4] Validating MPIN...")
-    code, resp, resp_hdrs = http_post(
-        f"{base_url}/verifypin",
-        {"pin": pin},
-        headers={"Authorization": f"Bearer {auth_token}", "x-device-id": device_id}
-    )
+        auth_token = (
+            resp.get("auth_token")
+            or resp.get("authToken")
+            or resp.get("token")
+            or resp.get("temp_token")
+            or resp.get("tempToken")
+            or data_dict.get("auth_token")
+            or data_dict.get("authToken")
+            or data_dict.get("token")
+            or data_dict.get("temp_token")
+            or header_auth
+            or temp_token  # Fallback to Step 1 temp_token validated server-side
+        )
 
-    data_dict = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-    session_token = (
-        resp.get("session_token")
-        or resp.get("token")
-        or resp.get("auth_token")
-        or data_dict.get("session_token")
-        or data_dict.get("token")
-        or resp_hdrs.get("authorization")
-    )
+        has_error = bool(resp.get("error") or resp.get("nubra_error_code"))
+        if code in (200, 201) and not has_error:
+            print(f"  ✓ {resp.get('message', 'OTP verified successfully.')}")
+            token_src = "auth_token" if resp.get("auth_token") else ("temp_token" if resp.get("temp_token") else "fallback")
+            token_preview = f"{auth_token[:8]}..." if auth_token else "NONE"
+            print(f"    (Session token type: {token_src}, Preview: {token_preview})")
+            break
+        else:
+            err_msg = resp.get("error") or resp.get("message") or resp
+            print(f"[!] OTP verification failed (HTTP {code}): {err_msg}")
+            if attempt < 2:
+                print(f"    ({2 - attempt} attempts remaining. Please try again.)")
+            else:
+                return None
 
-    if code != 200 or not session_token:
-        print(f"[!] Step 4 failed (HTTP {code}): {resp.get('message', resp)}")
-        print(f"    Payload received: {resp}")
-        return None
+    # Step 3: Verify MPIN (allows 3 attempts)
+    session_token = None
+    for attempt in range(3):
+        pin = getpass.getpass("\nEnter your 4-digit MPIN: ").strip()
+        if not pin:
+            print("[!] MPIN cannot be empty.")
+            continue
 
-    print("  ✓ Login successful! Session token acquired.")
-    return session_token, device_id
+        print(f"  Validating {len(pin)}-digit PIN with Nubra...")
+        # Official Nubra V3 verifypin headers & payload
+        pin_headers = {
+            "Authorization": f"Bearer {auth_token}",
+            "x-device-id": device_id,
+        }
+        # Provide both 'pin' and 'mpin' in payload for compatibility across API revisions
+        payload = {"pin": pin, "mpin": pin}
+
+        code, resp, resp_hdrs = http_post(
+            f"{base_url}/verifypin",
+            payload,
+            headers=pin_headers
+        )
+
+        data_dict = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+        session_token = (
+            resp.get("session_token")
+            or resp.get("token")
+            or data_dict.get("session_token")
+            or data_dict.get("token")
+            or resp_hdrs.get("authorization")
+        )
+
+        if code in (200, 201) and session_token:
+            print("  ✓ Login successful! Session token acquired.")
+            return session_token, device_id
+        else:
+            err_detail = resp.get("error") or resp.get("message") or resp
+            if code in (401, 440):
+                print(f"[!] Invalid MPIN (HTTP {code}): {err_detail}")
+                print("    Hint: Ensure you are entering the 4-digit PIN for your Nubra account.")
+            else:
+                print(f"[!] MPIN validation failed (HTTP {code}): {err_detail}")
+            print(f"    Raw response: {resp}")
+            if attempt < 2:
+                print(f"    ({2 - attempt} attempts remaining. Please try again.)")
+            else:
+                return None
+
+    return None
 
 def test_nubra_credentials(base_url: str, session_token: str, device_id: str) -> bool:
     print("\nTesting Nubra UAT connectivity with credentials...")
-    test_url = f"{base_url.rstrip('/')}/instruments"
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    test_url = f"{base_url.rstrip('/')}/refdata/refdata/{today}?exchange=NSE"
     headers = {
         "Authorization": f"Bearer {session_token}",
         "x-device-id": device_id,
+        "x-device-os": "sdk",
+        "x-app-version": "0.5.4",
+        "Cookie": f"deviceId={device_id}",
         "Accept": "application/json"
     }
 
