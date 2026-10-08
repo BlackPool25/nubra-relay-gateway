@@ -104,6 +104,32 @@ order_resp = requests.post(f"{BASE_URL}/sentinel/orders/create", json=order_payl
 print("Order Placement:", order_resp.json())
 ```
 
+### Approach B: Using the Official `nubra-sdk` Python Package (`NubraTrader`)
+
+If the workshop assignment requires using Nubra's official Python SDK classes (`NubraTrader`), students can use [`scripts/student_sdk_helper.py`](file:///home/shreyas/projects/nubra-relay-gateway/scripts/student_sdk_helper.py) to initialize `NubraTrader` targeting the relay without needing an OTP or MPIN:
+
+```python
+from student_sdk_helper import get_nubra_trader
+
+RELAY_URL = "https://nubra-relay.<your-tailnet>.ts.net"
+STUDENT_TOKEN = "STU_TOKEN_01_A8B2"
+
+# Instantiates an authenticated NubraTrader instance directly
+trader = get_nubra_trader(RELAY_URL, STUDENT_TOKEN)
+
+# Place orders using official SDK methods:
+response = trader.create_order({
+    "ref_id": 97713,
+    "order_side": "ORDER_SIDE_BUY",
+    "order_type": "ORDER_TYPE_LIMIT",
+    "order_qty": 10,
+    "order_price": 450.5,
+    "order_delivery_type": "ORDER_DELIVERY_TYPE_IDAY",
+    "execution_type": "STRATEGY_TYPE_MARKET"
+})
+print("Order Response:", response)
+```
+
 ---
 
 ## ⚙️ Configuration Reference (`.env`)

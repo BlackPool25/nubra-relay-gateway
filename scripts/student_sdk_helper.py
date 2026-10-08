@@ -1,0 +1,66 @@
+"""
+Student SDK Adapter for Nubra Python SDK (nubra-sdk)
+Allows participants to use the official NubraTrader SDK client directly with
+the workshop relay gateway without having to perform OTP/MPIN logins.
+"""
+
+from typing import Optional
+try:
+    from nubra_python_sdk.start_sdk import InitNubraSdk
+    from nubra_python_sdk.trading.trading_data import NubraTrader
+except ImportError:
+    raise ImportError(
+        "nubra-sdk is not installed. Install it with: pip install nubra-sdk"
+    )
+
+def get_relay_client(
+    relay_url: str,
+    student_token: str,
+    device_id: str = "student-workstation"
+) -> InitNubraSdk:
+    """
+    Creates an initialized Nubra SDK client targeting the workshop relay gateway.
+    Bypasses interactive OTP and MPIN terminal login prompts.
+    """
+    client = InitNubraSdk.__new__(InitNubraSdk)
+    client.API_BASE_URL = relay_url.rstrip("/")
+    client.db_path = "auth_data.db"
+    client.totp_login = False
+    client.token_data = {
+        "auth_token": student_token,
+        "session_token": student_token,
+        "x-device-id": device_id
+    }
+    client.env_path_login = False
+
+    # Bind headers to the relay token
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {student_token}",
+        "x-device-id": device_id,
+    }
+    InitNubraSdk.HEADERS = headers
+    client.HEADERS = headers
+    return client
+
+def get_nubra_trader(
+    relay_url: str,
+    student_token: str,
+    device_id: str = "student-workstation"
+) -> NubraTrader:
+    """
+    Returns an authenticated NubraTrader instance pointing directly to the relay gateway.
+    Students can use all standard methods like trader.create_order(), trader.orders(), etc.
+
+    Example:
+    >>> trader = get_nubra_trader("https://nubra-relay.<tailnet>.ts.net", "STU_TOKEN_01")
+    >>> trader.create_order({
+    ...     "ref_id": 97713,
+    ...     "order_side": "ORDER_SIDE_BUY",
+    ...     "order_type": "ORDER_TYPE_LIMIT",
+    ...     "order_qty": 10,
+    ...     "order_price": 450.5
+    ... })
+    """
+    client = get_relay_client(relay_url, student_token, device_id)
+    return NubraTrader(client)
